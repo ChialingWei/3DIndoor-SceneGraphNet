@@ -79,11 +79,99 @@ class train_model():
         self.MAX_ACC = -1.0
         self.MAX_ACC = -1.0
         self.MIN_LOSS = 1e10
-        self.MIN_DIM_LOSS = 1e10
+        self.MIN_POS_LOSS = 1e10
         self.STATE = 'INIT'
 
     ''' useful functions '''
-    def find_root_to_leaf_node_path(self, node_list, cur_node):
+    def find_root_to_leaf_node_path(self, node_list):
+        """
+        nodes: dict mapping node_id -> {
+            'type': str,
+            ...,
+            '<edge_kind>': [list of neighbor node_ids],  # for each of floor_wall, wall_wall, object_support, object_neighbor, object_cooc
+        }
+        Returns: list of lists, each a root-to-node path satisfying the rule.
+        """
+        # 1) Build undirected adjacency
+        edge_kinds = ['floor_wall','wall_wall','supporting','supported by','surrounding','surrounded by','object_cooc']
+        adj = {n: set() for n in node_list}
+        for n, info in node_list.items():
+            for kind in edge_kinds:
+                for m in info.get(kind, []):
+                    adj[n].add(m)
+                    adj[m].add(n)
+        
+        paths = []
+        visited = set()
+
+        def dfs(path):
+            current = path[-1]
+            # If this is not the root and it's NOT a direct Floor→Wall step, record it
+            if len(path) > 1:
+                # detect direct Floor→Wall
+                if not (path[0] == 'Floor' and len(path) == 2 and node_list[current]['type'] == 'Wall'):
+                    paths.append(path.copy())
+            # Now recurse unless we hit a “stop-here” case:
+            #   Floor→Wall must not recurse
+            wall_count = sum(1 for u in path if node_list[u]['type'] == 'Wall')
+            # Otherwise, continue to unvisited neighbors
+            for nbr in adj[current]:
+                if nbr in path:
+                    continue
+                if node_list[nbr]['type'] == 'Wall' and wall_count >= 1:
+                    continue
+                path.append(nbr)
+                dfs(path)
+                path.pop()
+        
+        # Kick off from Floor
+        if 'Floor' not in node_list:
+            raise KeyError("No 'Floor' node in dictionary")
+        dfs(['Floor'])
+        return paths
+
+    def gen_root_to_leaf_node_paths(self, node_list):
+        """
+        A generator version of your DFS.  Yields one valid path at a time,
+        applying your rules (no bare Floor→Wall; no second Wall in any path).
+        """
+        edge_kinds = ['floor_wall', 'object_support', 'object_neighbor', 'object_cooc']
+        # build undirected adjacency
+        adj = {n: set() for n in node_list}
+        for n, info in node_list.items():
+            for kind in edge_kinds:
+                for m in info.get(kind, []):
+                    adj[n].add(m)
+                    adj[m].add(n)
+
+        def dfs(path):
+            current = path[-1]
+
+            # yield this path if it isn’t the forbidden [Floor,Wall] prefix
+            if not (len(path) == 2
+                    and path[0] == 'Floor'
+                    and node_list[current]['type'] == 'Wall'):
+                yield path.copy()
+
+            # count how many Walls are already in the path (excl. Floor)
+            wall_count = sum(1 for u in path if node_list[u]['type'] == 'Wall')
+
+            for nbr in adj[current]:
+                if nbr in path:
+                    continue
+                # never step into a second Wall
+                if node_list[nbr]['type'] == 'Wall' and wall_count >= 1:
+                    continue
+
+                path.append(nbr)
+                yield from dfs(path)
+                path.pop()
+
+        if 'Floor' not in node_list:
+            raise KeyError("No 'Floor' node in dictionary")
+        yield from dfs(['Floor'])
+
+    def find_root_to_leaf_node_path_office(self, node_list, cur_node):
         """
         find a list of paths from tree root to tree leaf nodes (in a recursive way)
         :param node_list: tree node list
@@ -91,7 +179,7 @@ class train_model():
         :return:
         """
         root_to_leaf_path = []
-
+        
         # middle node
         if (len(node_list[cur_node]['co-occurrence']) + len(node_list[cur_node]['surround']) +
                 len(node_list[cur_node]['support']) > 0):
@@ -124,21 +212,37 @@ class train_model():
         sub_keys = []
 
         # middle node
-        if (len(node_list[cur_node]['co-occurrence']) + len(node_list[cur_node]['surround']) +
-                len(node_list[cur_node]['support']) > 0):
-            for child in node_list[cur_node]['co-occurrence']:
+        # if (len(node_list[cur_node]['co-occurrence']) + len(node_list[cur_node]['surround']) +
+        #         len(node_list[cur_node]['support']) > 0):
+        if (len(node_list[cur_node]['floor_wall']) + len(node_list[cur_node]['wall_wall']) +
+                len(node_list[cur_node]['object_support']) + len(node_list[cur_node]['object_neighbor']) + 
+                len(node_list[cur_node]['object_cooc']) > 0):
+            
+            for child in node_list[cur_node]['floor_wall']:
                 child_sub_keys = self.find_selected_node_list(node_list, child)
                 sub_keys += child_sub_keys
 
-            for child in node_list[cur_node]['support']:
+            for child in node_list[cur_node]['wall_wall']:
                 child_sub_keys = self.find_selected_node_list(node_list, child)
                 sub_keys += child_sub_keys
 
-            for child in node_list[cur_node]['surround']:
-                for key in child.keys():
-                    child_sub_keys = self.find_selected_node_list(node_list, key)
-                    child_sub_keys += self.find_selected_node_list(node_list, child[key])
-                    sub_keys += child_sub_keys
+            for child in node_list[cur_node]['object_support']:
+                child_sub_keys = self.find_selected_node_list(node_list, child)
+                sub_keys += child_sub_keys
+
+            for child in node_list[cur_node]['object_neighbor']:
+                child_sub_keys = self.find_selected_node_list(node_list, child)
+                sub_keys += child_sub_keys
+            
+            for child in node_list[cur_node]['object_cooc']:
+                child_sub_keys = self.find_selected_node_list(node_list, child)
+                sub_keys += child_sub_keys
+
+            # for child in node_list[cur_node]['surround']:
+            #     for key in child.keys():
+            #         child_sub_keys = self.find_selected_node_list(node_list, key)
+            #         child_sub_keys += self.find_selected_node_list(node_list, child[key])
+            #         sub_keys += child_sub_keys
             sub_keys += [cur_node]
             return sub_keys
         # leaf node
@@ -213,6 +317,29 @@ class train_model():
 
         return node_list
 
+    def select_valid_scene_nodes(self, node_list):
+        target_nodes = []
+
+        for node_name, node_data in node_list.items():
+            node_type = node_data.get('type', '').lower()
+
+            # Skip structure nodes like Floor or Wall
+            if node_type in ['Floor', 'Wall']:
+                continue
+
+            # # Must be movable or interactive (e.g., Seating, Table)
+            # if not node_data.get('self_info', {}).get('is_movable', True):
+            #     continue
+
+            # # Optional: Must have neighbors
+            # if len(node_data.get('object_neighbor', [])) < 1:
+            #     continue
+
+            target_nodes.append(node_name)
+
+        return target_nodes
+
+
     def _training_pass(self, valid_rooms, epoch, is_training=True):
         """
         Single training pass
@@ -237,7 +364,7 @@ class train_model():
             self.full_dec.eval()
 
         ''' init loss / accuracy '''
-        loss_cat_per_epoch, acc_cat_per_epoch, loss_dim_per_epoch, num_node_per_epoch, dim_acc_per_epoch = 0.0, {1:0.0, 3:0.0, 5:0.0}, 0.0, 0.0, 0.0
+        loss_cat_per_epoch, acc_cat_per_epoch, loss_pos_per_epoch, num_node_per_epoch = 0.0, {1:0.0, 3:0.0, 5:0.0}, 0.0, 0.0
 
         ''' shuffle room list and create training batches '''
         shuffle(valid_rooms)
@@ -262,57 +389,81 @@ class train_model():
             # loop for rooms
             for room_i, room in enumerate(batch_rooms):
 
-                node_list = self.__preprocess_root_wall_nodes__(room['node_list'])
+                # node_list = self.__preprocess_root_wall_nodes__(room['node_list'])
+                node_list = room['node_list']
 
                 # adapt acceleration for large graphs (by splitting into sub-graphs)
-                consider_path_type = ['root']
+                consider_path_type = ['Floor']
                 root_to_split = False
 
                 if(opt_parser.adapt_training_on_large_graph):
                     if (len(node_list.keys()) >= int(opt_parser.max_scene_nodes)):
-                        consider_path_type = node_list['root']['support']
+                        consider_path_type = node_list['root']['floor_wall']
                         root_to_split = True
-
+                print('room idx', room_i)
                 # loop for sub-graphs
                 for sub_tree_root_node in consider_path_type:
 
-                    # find sub-graph's root to leaf node path
-                    subtree_to_leaf_path = self.find_root_to_leaf_node_path(node_list, cur_node=sub_tree_root_node)
+                    # # find sub-graph's root to leaf node path
+                    subtree_to_leaf_path = self.find_root_to_leaf_node_path(node_list)
+                    print('len(path)', len(subtree_to_leaf_path))
+                    print('last path', subtree_to_leaf_path[-1])
+                    # print('subtree_to_leaf_path', subtree_to_leaf_path)
+                    # # skip unreasonable paths
+                    # subtree_to_leaf_path = [p for p in subtree_to_leaf_path if len(p) >= 2 and len(p) < opt_parser.max_scene_nodes]
+                    # subtree_to_leaf_path = [p for p in subtree_to_leaf_path if 'Wall' not in p[-1].split('_')[0]]
+                    # if(len(subtree_to_leaf_path) == 0):
+                    #     continue
 
-                    # skip unreasonable paths
-                    subtree_to_leaf_path = [p for p in subtree_to_leaf_path if len(p) >= 2 and len(p) < opt_parser.max_scene_nodes]
-                    subtree_to_leaf_path = [p for p in subtree_to_leaf_path if 'wall' not in p[-1].split('_')[0]]
-                    if(len(subtree_to_leaf_path) == 0):
-                        continue
+                    # # find node list for sub-graphs
+                    # sub_keys = list(set(self.find_selected_node_list(node_list, sub_tree_root_node)))
+                    # if(root_to_split):
+                    #     sub_keys += ['Floor']
+                    # sub_node_list = dict((k, node_list[k]) for k in sub_keys if k in node_list.keys())
 
-                    # find node list for sub-graphs
-                    sub_keys = list(set(self.find_selected_node_list(node_list, sub_tree_root_node)))
-                    if(root_to_split):
-                        sub_keys += ['root']
-                    sub_node_list = dict((k, node_list[k]) for k in sub_keys if k in node_list.keys())
-
-                    # update parents, childs, siblings for each node
-                    sub_node_list = self.find_parent_sibling_child_list(sub_node_list)
-
-                    # exclude examples with too many sub tree nodes
-                    if(len(sub_node_list.keys()) >= int(opt_parser.max_scene_nodes)):
-                        print('skip too large sub-scene:', len(sub_node_list.keys()), '>', opt_parser.max_scene_nodes)
-                        continue
+                    # # # update parents, childs, siblings for each node
+                    
+                    # # sub_node_list = self.find_parent_sibling_child_list(sub_node_list)
+                    # print('node_lst', sub_node_list)
+                    # # exclude examples with too many sub tree nodes
+                    # if(len(sub_node_list.keys()) >= int(opt_parser.max_scene_nodes)):
+                    #     print('skip too large sub-scene:', len(sub_node_list.keys()), '>', opt_parser.max_scene_nodes)
+                    #     continue
 
                     subtree_to_leaf_path.sort()
-                    # loop for each root-to-leaf path
+                    # # loop for each root-to-leaf path
                     for rand_path_idx, rand_path in enumerate(subtree_to_leaf_path):
 
-                        rand_path_fold, rand_path_node_name_order = self.model.encode_tree_fold(enc_fold, sub_node_list, rand_path, opt_parser)
+                        rand_path_fold, rand_path_node_name_order = self.model.encode_tree_fold(enc_fold, node_list, rand_path, opt_parser)
                         enc_fold_nodes += rand_path_fold
                         enc_rand_path_order += [[room_i, sub_tree_root_node] + rand_path_node_name_order]
                         enc_rand_path_root_to_leaf_order += [rand_path]
+
+                    # # Replace root-to-leaf paths with single-node selections
+                    # target_nodes = self.select_valid_scene_nodes(node_list)  # your function
+
+                    # for target_node in target_nodes:
+                    #     rand_path = [target_node]  # Treat single node as pseudo-path
+
+                    #     rand_path_fold, rand_path_node_name_order = self.model.encode_tree_fold(enc_fold, node_list, rand_path, opt_parser)
+                    #     enc_fold_nodes += rand_path_fold
+                    #     enc_rand_path_order += [[room_i, sub_tree_root_node] + rand_path_node_name_order]
+                    #     enc_rand_path_root_to_leaf_order += [rand_path]
+
+                    # assume find_root_to_leaf_node_path is now a generator
+                    # for rand_path in self.find_root_to_leaf_node_path(node_list):
+                    # for rand_path_idx, rand_path in enumerate(self.gen_root_to_leaf_node_paths(node_list)):
+                    #     rand_path_fold, rand_path_node_name_order = self.model.encode_tree_fold(
+                    #         enc_fold, node_list, rand_path, opt_parser
+                    #     )
+                    #     enc_fold_nodes += rand_path_fold
+                    #     enc_rand_path_order.append([room_i, sub_tree_root_node] + rand_path_node_name_order)
+                    #     enc_rand_path_root_to_leaf_order.append(rand_path)
 
             # if batch size is too small, sometimes there is no valid training instance.
             if(len(enc_fold_nodes) == 0):
                 print('surprisingly this batch has no valid training trees!')
                 continue
-
 
             # torch-fold train encoder
             enc_fold_nodes = enc_fold.apply(self.full_enc, [enc_fold_nodes])
@@ -337,29 +488,35 @@ class train_model():
 
                 # decode to k-vec and add Ops to fold
                 dec_fold_nodes.append(self.model.decode_tree_fold(dec_fold, enc_fold_nodes[i], opt_parser))
+                # target_node = enc_rand_path_root_to_leaf_order[i][0]  # single node
+                # leaf_node_gt.append(self.model.get_gt_k_vec(node_list, target_node, opt_parser))
+
                 leaf_node_gt += [self.model.get_gt_k_vec(node_list, enc_rand_path_root_to_leaf_order[i][-1], opt_parser)]  # leaf node ground-truth k-vec
 
             # torch-fold decoder
             dec_fold_nodes = dec_fold.apply(self.full_dec, [dec_fold_nodes])
             leaf_node_pred = dec_fold_nodes[0]
+            
 
             """ ==================================================================
                                       Loss / Accuray Part
             ================================================================== """
-            size_pos_dim = 6
+            size_pos_dim = 2
 
             leaf_node_cat_gt = [c[:-size_pos_dim].index(1) for c in leaf_node_gt]
+
             leaf_node_cat_gt = to_torch(leaf_node_cat_gt, torch_type=torch.LongTensor, dim_0=len(leaf_node_gt)).view(-1)
 
-            leaf_node_dim_gt = [c[-size_pos_dim:-size_pos_dim+3] for c in leaf_node_gt]
-            leaf_node_dim_gt = to_torch(leaf_node_dim_gt, torch_type=torch.FloatTensor, dim_0=len(leaf_node_gt))
+            leaf_node_pos_gt = [c[-size_pos_dim:] for c in leaf_node_gt]
+         
+            leaf_node_pos_gt = to_torch(leaf_node_pos_gt, torch_type=torch.FloatTensor, dim_0=len(leaf_node_gt))
 
             loss_cat = self.LOSS_CLS(leaf_node_pred[:, :-size_pos_dim], leaf_node_cat_gt)
-            loss_dim = self.LOSS_L2(leaf_node_pred[:, -size_pos_dim:-size_pos_dim+3], leaf_node_dim_gt) * 1000
+            loss_pos = self.LOSS_L2(leaf_node_pred[:, -size_pos_dim:], leaf_node_pos_gt) * 1000
 
             # report scores
             loss_cat_per_batch = loss_cat.data.cpu().numpy()
-            loss_dim_per_batch = loss_dim.data.cpu().numpy()
+            loss_pos_per_batch = loss_pos.data.cpu().numpy()
             num_node_per_batch = len(leaf_node_gt) * 1.0
 
             # accuracy (top k)
@@ -368,20 +525,22 @@ class train_model():
                 _, pred = leaf_node_pred[:, :-size_pos_dim].topk(k, 1, True, True)
                 pred = pred.t()
                 correct = pred.eq(leaf_node_cat_gt.view(1, -1).expand_as(pred))
-                correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+                # correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+                correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
+
                 acc_cat_per_batch[k] = correct_k[0].cpu().numpy()
 
-            # dimension (diagonal) percentage off
-            diag_pred = np.sqrt(
-                np.sum(leaf_node_pred[:, -size_pos_dim:-size_pos_dim+3].data.cpu().numpy() ** 2, axis=1))
-            diag_gt = np.sqrt(
-                np.sum(leaf_node_dim_gt.data.cpu().numpy() ** 2, axis=1))
-            dim_acc_per_batch = np.sum(np.abs(diag_pred - diag_gt) / diag_gt)
+            # # dimension (diagonal) percentage off
+            # diag_pred = np.sqrt(
+            #     np.sum(leaf_node_pred[:, -size_pos_dim:-size_pos_dim+3].data.cpu().numpy() ** 2, axis=1))
+            # diag_gt = np.sqrt(
+            #     np.sum(leaf_node_pos_gt.data.cpu().numpy() ** 2, axis=1))
+            # dim_acc_per_batch = np.sum(np.abs(diag_pred - diag_gt) / diag_gt)
 
             loss_cat_per_epoch += loss_cat_per_batch
-            loss_dim_per_epoch += loss_dim_per_batch
+            loss_pos_per_epoch += loss_pos_per_batch
             num_node_per_epoch += num_node_per_batch
-            dim_acc_per_epoch += dim_acc_per_batch
+            # dim_acc_per_epoch += dim_acc_per_batch
             for key in acc_cat_per_epoch.keys():
                 acc_cat_per_epoch[key] += acc_cat_per_batch[key]
 
@@ -391,18 +550,18 @@ class train_model():
                 for key in self.opt.keys():
                     self.opt[key].zero_grad()
 
-                # only train object dimensions
-                if(opt_parser.train_dim and not opt_parser.train_cat):
-                    loss_dim.backward()
+                # only train object positions
+                if(opt_parser.train_pos and not opt_parser.train_cat):
+                    loss_pos.backward()
                 # only train object categories
-                elif(opt_parser.train_cat and not opt_parser.train_dim):
+                elif(opt_parser.train_cat and not opt_parser.train_pos):
                     loss_cat.backward()
                 # train both
-                elif(opt_parser.train_cat and opt_parser.train_dim):
+                elif(opt_parser.train_cat and opt_parser.train_pos):
                     loss_cat.backward(retain_graph=True)
-                    loss_dim.backward()
+                    loss_pos.backward()
                 else:
-                    print('At least enable --train_cat or --train_dim.')
+                    print('At least enable --train_cat or --train_pos.')
                     exit(-1)
 
                 for key in self.opt.keys():
@@ -411,13 +570,12 @@ class train_model():
             if (opt_parser.verbose >= 0):
                 print(self.STATE, opt_parser.name, epoch,
                       ': ({}/{}:{})'.format(batch_i, len(room_idx_batches), num_node_per_batch),
-                      'CAT Loss: {:.4f}, Acc_1: {:.4f}, Acc_3: {:.4f}, Acc_5: {:.4f},Dim Loss: {:.8f}, dim acc: {:.2f}'.format(
+                      'CAT Loss: {:.4f}, Acc_1: {:.4f}, Acc_3: {:.4f}, Acc_5: {:.4f}, Pos Loss: {:.4f}'.format(
                           loss_cat_per_batch / num_node_per_batch * 100.0,
                           acc_cat_per_batch[1] / num_node_per_batch,
                           acc_cat_per_batch[3] / num_node_per_batch,
                           acc_cat_per_batch[5] / num_node_per_batch,
-                          loss_dim_per_batch / num_node_per_batch,
-                          dim_acc_per_batch / num_node_per_batch))
+                          loss_pos_per_batch / num_node_per_batch))
 
         """ ==================================================================
                                   Report Part
@@ -425,13 +583,12 @@ class train_model():
 
         print('========================================================')
         print(self.STATE, epoch, ': ',
-              'CAT Loss: {:.4f}, Acc_1: {:.4f}, Acc_3: {:.4f}, Acc_5: {:.4f}, Dim Loss: {:.4f}, Dim acc: {:.4f}'.format(
+              'CAT Loss: {:.4f}, Acc_1: {:.4f}, Acc_3: {:.4f}, Acc_5: {:.4f}, Pos Loss: {:.4f}'.format(
                   loss_cat_per_epoch / num_node_per_epoch * 100.0,
                   acc_cat_per_epoch[1] / num_node_per_epoch,
                   acc_cat_per_epoch[3] / num_node_per_epoch,
                   acc_cat_per_epoch[5] / num_node_per_epoch,
-                  loss_dim_per_epoch / num_node_per_epoch,
-                  dim_acc_per_epoch / num_node_per_epoch))
+                  loss_pos_per_epoch / num_node_per_epoch))
         print('========================================================')
 
         ''' write avg to log '''
@@ -444,7 +601,7 @@ class train_model():
                               epoch)
             self.writer.add_scalar('{}_ACC_5_CAT'.format(self.STATE), acc_cat_per_epoch[5] / num_node_per_epoch,
                               epoch)
-            self.writer.add_scalar('{}_LOSS_DIM'.format(self.STATE), loss_dim_per_epoch / num_node_per_epoch,
+            self.writer.add_scalar('{}_LOSS_DIM'.format(self.STATE), loss_pos_per_epoch / num_node_per_epoch,
                               epoch)
 
         ''' save model '''
@@ -460,9 +617,9 @@ class train_model():
 
             # if model is better, save model checkpoint
             # min dim loss model
-            if(loss_dim_per_epoch / num_node_per_epoch < self.MIN_DIM_LOSS):
-                self.MIN_DIM_LOSS = loss_dim_per_epoch / num_node_per_epoch
-                save_model('min_dim_loss')
+            if(loss_pos_per_epoch / num_node_per_epoch < self.MIN_POS_LOSS):
+                self.MIN_POS_LOSS = loss_pos_per_epoch / num_node_per_epoch
+                save_model('min_pos_loss')
             # max cat acc model (top-5 acc)
             if (acc_cat_per_epoch[5] / num_node_per_epoch > self.MAX_ACC):
                 self.MAX_ACC = acc_cat_per_epoch[5] / num_node_per_epoch

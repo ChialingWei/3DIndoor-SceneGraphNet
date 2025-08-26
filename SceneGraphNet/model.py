@@ -3,11 +3,12 @@ import torch.nn as nn
 import torch.nn.parallel
 import torch.utils.data
 from torch.autograd import Variable
-from utils.default_settings import dic_id2type
+# from utils.default_settings import dic_id2type
 import copy
 import numpy as np
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cpu')
 
 ''' to_torch Variable '''
 def to_torch(n, torch_type=torch.FloatTensor, requires_grad=False, dim_0=1):
@@ -24,27 +25,33 @@ def get_gt_k_vec(node_list, cur_node, opt_parser):
     :return:
     """
 
-    if (node_list[cur_node]['type'] == 'root'):
-        cat = 'wall'
-        dim_vec = [0.0] * 3
-        pos_vec = [0.0] * 3
-    elif (node_list[cur_node]['type'] == 'wall'):
-        cat = 'wall'
-        dim_vec = node_list[cur_node]['self_info']['dim']
-        pos_vec = node_list[cur_node]['self_info']['translation']
+    if (node_list[cur_node]['type'] == 'Floor'):
+        cat = 'Wall'
+        # dim_vec = [0.0] * 2
+        pos_vec = [0.0] * 2
     else:
-        if(len(node_list[cur_node]['self_info']['node_model_id']) > 2 and
-                node_list[cur_node]['self_info']['node_model_id'][0:2] == 'EX'):
-            cat = node_list[cur_node]['self_info']['node_model_id'][3:]
-        else:
-            cat = dic_id2type[node_list[cur_node]['self_info']['node_model_id']][1]
-        dim_vec = node_list[cur_node]['self_info']['dim']
-        pos_vec = node_list[cur_node]['self_info']['translation']
+        cat = node_list[cur_node]['type']
+        # dim_vec = node_list[cur_node]['self_info']['dim']
+        pos_vec = node_list[cur_node]['self_info']['center point']
+
+    # elif (node_list[cur_node]['type'] == 'Wall'):
+    #     cat = 'Wall'
+    #     dim_vec = node_list[cur_node]['self_info']['dim']
+    #     pos_vec = node_list[cur_node]['self_info']['translation']
+    # else:
+    #     if(len(node_list[cur_node]['self_info']['node_model_id']) > 2 and
+    #             node_list[cur_node]['self_info']['node_model_id'][0:2] == 'EX'):
+    #         cat = node_list[cur_node]['self_info']['node_model_id'][3:]
+    #     else:
+    #         cat = dic_id2type[node_list[cur_node]['self_info']['node_model_id']][1]
+    #     dim_vec = node_list[cur_node]['self_info']['dim']
+    #     pos_vec = node_list[cur_node]['self_info']['translation']
 
     cat_vec = [0.0] * (len(opt_parser.cat2id.keys()) + 1)
     cat_vec[int(opt_parser.cat2id[cat])] = 1.0
 
-    return cat_vec + dim_vec + pos_vec
+    return cat_vec +  pos_vec
+    # return cat_vec + dim_vec + pos_vec
 
 
 class AggregateMaxPoolEnc(nn.Module):
@@ -162,14 +169,14 @@ class UpdateEnc(nn.Module):
         super(UpdateEnc, self).__init__()
 
         self.enc = nn.Sequential(
-            nn.Linear(d * 7, h),
+            nn.Linear(d * 9, h),
             nn.ReLU(),
             nn.Linear(h, d),
             # nn.Tanh()
         )
 
-    def forward(self, self_vec, p_sup_vec, c_sup_vec, p_sur_vec, c_sur_vec, n_vec, co_vec):
-        feat = torch.cat((self_vec, p_sup_vec, c_sup_vec, p_sur_vec, c_sur_vec, n_vec, co_vec), dim=1)
+    def forward(self, self_vec, f_w_vec, w_w_vec, sp_vec, spb_vec, sur_vec, surb_vec, ne_vec, co_vec):
+        feat = torch.cat((self_vec, f_w_vec, w_w_vec, sp_vec, spb_vec, sur_vec, surb_vec, ne_vec, co_vec), dim=1)
         d_vec = self.enc(feat)
         return d_vec
 
@@ -231,14 +238,16 @@ class FullEnc(nn.Module):
             print('Aggregation function selection error')
             exit(-1)
 
-        self.aggregate_neighbor_enc = AggregateEnc(k, d, h)
-        self.aggregate_child_supp_enc = AggregateEnc(k, d, h)
-        self.aggregate_child_surr_enc = AggregateEnc(k, d, h)
-        self.aggregate_parent_supp_enc = AggregateEnc(k, d, h)
-        self.aggregate_parent_surr_enc = AggregateEnc(k, d, h)
-        self.aggregate_cooc_enc = AggregateEnc(k, d, h)
+        self.aggregate_floor_wall_enc = AggregateEnc(k, d, h)
+        self.aggregate_wall_wall_enc = AggregateEnc(k, d, h)
+        self.aggregate_obj_support_enc = AggregateEnc(k, d, h)
+        self.aggregate_obj_supportedby_enc = AggregateEnc(k, d, h)
+        self.aggregate_obj_surround_enc = AggregateEnc(k, d, h)
+        self.aggregate_obj_surroundby_enc = AggregateEnc(k, d, h)
+        self.aggregate_obj_neighbor_enc = AggregateEnc(k, d, h)
+        self.aggregate_obj_cooc_enc = AggregateEnc(k, d, h)
 
-        dis_vec_dim = 3
+        dis_vec_dim = 2
 
         self.learned_weight = LearnedWeight(k, h, dis_vec_dim=dis_vec_dim)
 
@@ -246,33 +255,57 @@ class FullEnc(nn.Module):
 
         self.box_enc = BoxEnc(k, d, h)
 
-    def aggregate_neighbor_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
-        return self.aggregate_neighbor_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
 
-    def aggregate_child_supp_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
-        return self.aggregate_child_supp_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
+    def aggregate_floor_wall_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
+        return self.aggregate_floor_wall_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
+    
+    def aggregate_wall_wall_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
+        return self.aggregate_wall_wall_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
+    
+    def aggregate_obj_support_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
+        return self.aggregate_obj_support_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
+    
+    def aggregate_obj_supportedby_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
+        return self.aggregate_obj_supportedby_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
 
-    def aggregate_child_surr_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
-        return self.aggregate_child_surr_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
+    def aggregate_obj_surround_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
+        return self.aggregate_obj_surround_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
+    
+    def aggregate_obj_surroundedby_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
+        return self.aggregate_obj_surroundby_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
 
-    def aggregate_parent_supp_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
-        return self.aggregate_parent_supp_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
+    def aggregate_obj_neighbor_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
+        return self.aggregate_obj_neighbor_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
+    
+    def aggregate_obj_cooc_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
+        return self.aggregate_obj_cooc_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
+    
+    # def aggregate_neighbor_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
+    #     return self.aggregate_neighbor_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
 
-    def aggregate_parent_surr_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
-        return self.aggregate_parent_surr_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
+    # def aggregate_child_supp_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
+    #     return self.aggregate_child_supp_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
 
-    def aggregate_cooc_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
-        return self.aggregate_cooc_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
+    # def aggregate_child_surr_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
+    #     return self.aggregate_child_surr_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
+
+    # def aggregate_parent_supp_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
+    #     return self.aggregate_parent_supp_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
+
+    # def aggregate_parent_surr_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
+    #     return self.aggregate_parent_surr_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
+
+    # def aggregate_cooc_func(self, d_vec, pre_vec, cur_d_vec, w=1.0, cat_msg=False):
+    #     return self.aggregate_cooc_enc(d_vec, pre_vec, cur_d_vec, w, cat_msg)
 
     def learned_weight_func(self, k_vec1, k_vec2, offset_vec):
         return self.learned_weight(k_vec1, k_vec2, offset_vec)
 
+    def aggregate_self_func(self, self_vec, f_w_vec, w_w_vec, sp_vec, spb_vec, sur_vec, surb_vec, ne_vec, co_vec):
+        return self.aggregate_self_enc(self_vec, f_w_vec, w_w_vec, sp_vec, spb_vec, sur_vec, surb_vec, ne_vec, co_vec)
 
-    def aggregate_self_func(self, self_vec, p_sup_vec, c_sup_vec, p_sur_vec, c_sur_vec, n_vec, co_vec):
-        return self.aggregate_self_enc(self_vec, p_sup_vec, c_sup_vec, p_sur_vec, c_sur_vec, n_vec, co_vec)
-
-    def cat_self_func(self, self_vec, p_sup_vec, c_sup_vec, p_sur_vec, c_sur_vec, n_vec, co_vec):
-        return torch.cat((self_vec, p_sup_vec, c_sup_vec, p_sur_vec, c_sur_vec, n_vec, co_vec), dim=1)
+    def cat_self_func(self, self_vec, f_w_vec, w_w_vec, sp_vec, spb_vec, sur_vec, surb_vec, ne_vec, co_vec):
+        return torch.cat((self_vec, f_w_vec, w_w_vec, sp_vec, spb_vec, sur_vec, surb_vec, ne_vec, co_vec), dim=1)
 
     def box_enc_func(self, k_vec):
         return self.box_enc(k_vec)
@@ -304,8 +337,10 @@ def encode_tree_fold(fold, raw_node_list, rand_path, opt_parser):
                 # if leaf node, reset its k-vec to all-zeros to represent it is missing
                 if(cur_node == leaf_node):
                     missing_cat = [0.0] * len(opt_parser.cat2id.keys()) + [1.0]
-                    missing_dim_pos = [0.0] * 3 + node_list[cur_node]['self_info']['translation']
-                    node_list[cur_node]['k-vec'] =  missing_cat + missing_dim_pos
+                    # missing_dim_pos = [0.0] * 3 + node_list[cur_node]['self_info']['translation']
+                    # missing_pos = node_list[cur_node]['self_info']['center point']
+                    missing_pos = [0.0] * 2
+                    node_list[cur_node]['k-vec'] =  missing_cat + missing_pos
                 else:
                     node_list[cur_node]['k-vec'] = get_gt_k_vec(node_list, cur_node, opt_parser)
 
@@ -318,13 +353,20 @@ def encode_tree_fold(fold, raw_node_list, rand_path, opt_parser):
             for cur_node in node_list.keys():
                 for neighbor_node in node_list.keys():
 
-                    dis_feat_vec = [node_list[cur_node]['self_info']['translation'][0] -
-                                    node_list[neighbor_node]['self_info']['translation'][0],
-                                    node_list[cur_node]['self_info']['translation'][1] -
-                                    node_list[neighbor_node]['self_info']['translation'][1],
-                                    node_list[cur_node]['self_info']['translation'][2] -
-                                    node_list[neighbor_node]['self_info']['translation'][2]]
-                    dis = np.sqrt(dis_feat_vec[0] ** 2 + dis_feat_vec[1] ** 2 + dis_feat_vec[2] ** 2)
+                    # dis_feat_vec = [node_list[cur_node]['self_info']['translation'][0] -
+                    #                 node_list[neighbor_node]['self_info']['translation'][0],
+                    #                 node_list[cur_node]['self_info']['translation'][1] -
+                    #                 node_list[neighbor_node]['self_info']['translation'][1],
+                    #                 node_list[cur_node]['self_info']['translation'][2] -
+                    #                 node_list[neighbor_node]['self_info']['translation'][2]]
+                    # dis = np.sqrt(dis_feat_vec[0] ** 2 + dis_feat_vec[1] ** 2 + dis_feat_vec[2] ** 2)
+
+                    dis_feat_vec = [node_list[cur_node]['self_info']['center point'][0] -
+                                    node_list[neighbor_node]['self_info']['center point'][0],
+                                    node_list[cur_node]['self_info']['center point'][1] -
+                                    node_list[neighbor_node]['self_info']['center point'][1]]
+                    dis = np.sqrt(dis_feat_vec[0] ** 2 + dis_feat_vec[1] ** 2)
+
                     dis_feat = dis_feat_vec
 
                     node_list[cur_node]['dis'][neighbor_node] = dis
@@ -335,78 +377,217 @@ def encode_tree_fold(fold, raw_node_list, rand_path, opt_parser):
 
         # graph message passing
         else:
-            for cur_node in node_list.keys():
+           for cur_node in node_list.keys():
                 cur_node_d_vec = node_list[cur_node]['pre-d-vec']
 
-                # message from parents (supported-by, surrounded-by relation)
-                aggregate_parent_d_vec ={'supp' : to_torch([0.0] * d_vec_dim), 'surr' : to_torch([0.0] * d_vec_dim)}
-                for parent_node, parent_node_type in node_list[cur_node]['parents']:
-                    parent_d_vec = node_list[parent_node]['pre-d-vec']
-                    aggregate_parent_d_vec[parent_node_type] = \
-                        fold.add('aggregate_parent_{}_func'.format(parent_node_type),
-                                 parent_d_vec,
-                                 aggregate_parent_d_vec[parent_node_type],
-                                 cur_node_d_vec,
-                                 to_torch([1.]),
-                                 to_torch(opt_parser.cat_msg, torch.bool))
-
-                # message from siblings (next-to relation)
-                aggregate_neighbor_d_vec = to_torch([0.0] * d_vec_dim)
-                for sibling_node_i, _ in node_list[cur_node]['siblings']:
+                # message from floor to wall (supporting relation)
+                aggregate_floor_wall_d_vec = to_torch([0.0] * d_vec_dim)
+                for floor_wall_node in node_list[cur_node]['floor_wall']:
+                    floor_node_d_vec = node_list[floor_wall_node]['pre-d-vec']
+                    aggregate_floor_wall_d_vec = fold.add('aggregate_floor_wall_func',
+                                                        floor_node_d_vec,
+                                                        aggregate_floor_wall_d_vec,
+                                                        cur_node_d_vec,
+                                                        to_torch([1.]),
+                                                        to_torch([opt_parser.cat_msg], torch.bool))
+                
+                # message from wall to wall (next-to relation)
+                aggregate_wall_wall_d_vec = to_torch([0.0] * d_vec_dim)
+                for sibling_node_i in node_list[cur_node]['wall_wall']:
                     sibling_node_d_vec = node_list[sibling_node_i]['pre-d-vec']
-                    aggregate_neighbor_d_vec = fold.add('aggregate_neighbor_func',
+                    aggregate_wall_wall_d_vec = fold.add('aggregate_wall_wall_func',
                                                         sibling_node_d_vec,
+                                                        aggregate_wall_wall_d_vec,
+                                                        cur_node_d_vec,
+                                                        to_torch([1.]),
+                                                        to_torch([opt_parser.cat_msg], torch.bool))
+                
+                # message from object - supporting - object (wall support object / furn support furn)
+                aggregate_support_d_vec = to_torch([0.0] * d_vec_dim)
+                for node_i in node_list[cur_node]['supporting']:
+                    node_d_vec = node_list[node_i]['pre-d-vec']
+                    aggregate_support_d_vec = fold.add('aggregate_obj_support_func',
+                                                        node_d_vec,
+                                                        aggregate_support_d_vec,
+                                                        cur_node_d_vec,
+                                                        to_torch([1.]),
+                                                        to_torch([opt_parser.cat_msg], torch.bool))
+                    
+                # message from object - supporting - object (wall support object / furn support furn)
+                aggregate_supportedby_d_vec = to_torch([0.0] * d_vec_dim)
+                for node_i in node_list[cur_node]['supported by']:
+                    node_d_vec = node_list[node_i]['pre-d-vec']
+                    aggregate_supportedby_d_vec = fold.add('aggregate_obj_supportedby_func',
+                                                        node_d_vec,
+                                                        aggregate_supportedby_d_vec,
+                                                        cur_node_d_vec,
+                                                        to_torch([1.]),
+                                                        to_torch([opt_parser.cat_msg], torch.bool))
+                    
+                # message from object - supporting - object (wall support object / furn support furn)
+                aggregate_surround_d_vec = to_torch([0.0] * d_vec_dim)
+                for node_i in node_list[cur_node]['surrounding']:
+                    node_d_vec = node_list[node_i]['pre-d-vec']
+                    aggregate_surround_d_vec = fold.add('aggregate_obj_surround_func',
+                                                        node_d_vec,
+                                                        aggregate_surround_d_vec,
+                                                        cur_node_d_vec,
+                                                        to_torch([1.]),
+                                                        to_torch([opt_parser.cat_msg], torch.bool))
+                    
+                # message from object - supporting - object (wall support object / furn support furn)
+                aggregate_surroundedby_d_vec = to_torch([0.0] * d_vec_dim)
+                for node_i in node_list[cur_node]['surrounded by']:
+                    node_d_vec = node_list[node_i]['pre-d-vec']
+                    aggregate_surroundedby_d_vec = fold.add('aggregate_obj_surroundedby_func',
+                                                        node_d_vec,
+                                                        aggregate_surroundedby_d_vec,
+                                                        cur_node_d_vec,
+                                                        to_torch([1.]),
+                                                        to_torch([opt_parser.cat_msg], torch.bool))
+                
+                # message from object - next to - object (wall next to object / furn next to furn)
+                aggregate_neighbor_d_vec = to_torch([0.0] * d_vec_dim)
+                for node_i in node_list[cur_node]['object_neighbor']:
+                    node_d_vec = node_list[node_i]['pre-d-vec']
+                    aggregate_neighbor_d_vec = fold.add('aggregate_obj_neighbor_func',
+                                                        node_d_vec,
                                                         aggregate_neighbor_d_vec,
                                                         cur_node_d_vec,
                                                         to_torch([1.]),
                                                         to_torch([opt_parser.cat_msg], torch.bool))
-
-                # message from childs (supporting, surrounding relation)
-                aggregate_child_d_vec = {'supp' : to_torch([0.0] * d_vec_dim), 'surr' : to_torch([0.0] * d_vec_dim)}
-                for child_node_i, child_node_type_i in node_list[cur_node]['childs']:
-                    child_node_d_vec = node_list[child_node_i]['pre-d-vec']
-                    aggregate_child_d_vec[child_node_type_i] = \
-                        fold.add('aggregate_child_{}_func'.format(child_node_type_i),
-                                 child_node_d_vec,
-                                 aggregate_child_d_vec[child_node_type_i],
-                                 cur_node_d_vec,
-                                 to_torch([1.]),
-                                 to_torch([opt_parser.cat_msg], torch.bool))
-
-                # message from loose neighbors (co-occurring relation)
+                
+                # message from wall - co-occuring - object (wall co-occur furn)
                 aggregate_cooc_d_vec = to_torch([0.0] * d_vec_dim)
-                if(opt_parser.aggregate_in_order):
-                    all_neighbor_nodes = list(node_list.keys())
-                    all_neighbor_nodes.sort(key=lambda  x: node_list[cur_node]['dis'][x], reverse=True)
-                else:
-                    all_neighbor_nodes = node_list.keys()
-                for neighbor_node in all_neighbor_nodes:
-                    if (neighbor_node != cur_node):
-                        w = node_list[cur_node]['w'][neighbor_node]
-                        neighbor_node_d_vec = node_list[neighbor_node]['pre-d-vec']
-                        aggregate_cooc_d_vec = fold.add('aggregate_cooc_func',
-                                                            neighbor_node_d_vec,
-                                                            aggregate_cooc_d_vec,
-                                                            cur_node_d_vec,
-                                                            w,
-                                                            to_torch([opt_parser.cat_msg], torch.bool))
+                for node_i in node_list[cur_node]['object_cooc']:
+                    node_d_vec = node_list[node_i]['pre-d-vec']
+                    aggregate_cooc_d_vec = fold.add('aggregate_obj_cooc_func',
+                                                        node_d_vec,
+                                                        aggregate_cooc_d_vec,
+                                                        cur_node_d_vec,
+                                                        to_torch([1.]),
+                                                        to_torch([opt_parser.cat_msg], torch.bool))
+                    
+
+                # # message from wall to non-wall/non-floor (supporting, co-occuring, next-to relation)
+                # aggregate_wall_other_d_vec = {'supp' : to_torch([0.0] * d_vec_dim), 'cooc' : to_torch([0.0] * d_vec_dim), 'neighbor' : to_torch([0.0] * d_vec_dim)}
+                # for child_node_i, child_node_type_i in node_list[cur_node]['wall_other']:
+                #     child_node_d_vec = node_list[child_node_i]['pre-d-vec']
+                #     aggregate_wall_other_d_vec[child_node_type_i] = \
+                #         fold.add('aggregate_wall_other_{}_func'.format(child_node_type_i),
+                #                  child_node_d_vec,
+                #                  aggregate_wall_other_d_vec[child_node_type_i],
+                #                  cur_node_d_vec,
+                #                  to_torch([1.]),
+                #                  to_torch([opt_parser.cat_msg], torch.bool))
+                    
+                # # message from furn to furn (supporting, next-to relation)
+                # aggregate_furn_furn_d_vec = {'supp' : to_torch([0.0] * d_vec_dim), 'neighbor' : to_torch([0.0] * d_vec_dim)}
+                # for child_node_i, child_node_type_i in node_list[cur_node]['furn_furn']:
+                #     child_node_d_vec = node_list[child_node_i]['pre-d-vec']
+                #     aggregate_furn_furn_d_vec[child_node_type_i] = \
+                #         fold.add('aggregate_furn_furn_{}_func'.format(child_node_type_i),
+                #                  child_node_d_vec,
+                #                  aggregate_furn_furn_d_vec[child_node_type_i],
+                #                  cur_node_d_vec,
+                #                  to_torch([1.]),
+                #                  to_torch([opt_parser.cat_msg], torch.bool))
 
                 node_list[cur_node]['d-vec'] = fold.add('aggregate_self_func',
                                                         node_list[cur_node]['pre-d-vec'],
-                                                        aggregate_parent_d_vec['supp'],
-                                                        aggregate_child_d_vec['supp'],
-                                                        aggregate_parent_d_vec['surr'],
-                                                        aggregate_child_d_vec['surr'],
-                                                        aggregate_neighbor_d_vec,
-                                                        aggregate_cooc_d_vec)
+                                                        aggregate_floor_wall_d_vec,              # floor - support - wall
+                                                        aggregate_wall_wall_d_vec,               #  wall - next to - wall
+                                                        aggregate_support_d_vec,                 # object - support - object
+                                                        aggregate_supportedby_d_vec,
+                                                        aggregate_surround_d_vec,
+                                                        aggregate_surroundedby_d_vec,
+                                                        aggregate_neighbor_d_vec,                # object - next to - object
+                                                        aggregate_cooc_d_vec)                    #  wall - co occur - object
+                
                 node_list[cur_node]['cat-d-vec'] = fold.add('cat_self_func',
                                                             node_list[cur_node]['pre-d-vec'],
-                                                            aggregate_parent_d_vec['supp'],
-                                                            aggregate_child_d_vec['supp'],
-                                                            aggregate_parent_d_vec['surr'],
-                                                            aggregate_child_d_vec['surr'],
+                                                            aggregate_floor_wall_d_vec,
+                                                            aggregate_wall_wall_d_vec,
+                                                            aggregate_support_d_vec,
+                                                            aggregate_supportedby_d_vec,
+                                                            aggregate_surround_d_vec,
+                                                            aggregate_surroundedby_d_vec,
                                                             aggregate_neighbor_d_vec,
                                                             aggregate_cooc_d_vec)
+
+
+            # for cur_node in node_list.keys():
+            #     cur_node_d_vec = node_list[cur_node]['pre-d-vec']
+
+            #     # message from parents (supported-by, surrounded-by relation)
+            #     aggregate_parent_d_vec ={'supp' : to_torch([0.0] * d_vec_dim), 'surr' : to_torch([0.0] * d_vec_dim)}
+            #     for parent_node, parent_node_type in node_list[cur_node]['parents']:
+            #         parent_d_vec = node_list[parent_node]['pre-d-vec']
+            #         aggregate_parent_d_vec[parent_node_type] = \
+            #             fold.add('aggregate_parent_{}_func'.format(parent_node_type),
+            #                      parent_d_vec,
+            #                      aggregate_parent_d_vec[parent_node_type],
+            #                      cur_node_d_vec,
+            #                      to_torch([1.]),
+            #                      to_torch(opt_parser.cat_msg, torch.bool))
+
+            #     # message from siblings (next-to relation)
+            #     aggregate_neighbor_d_vec = to_torch([0.0] * d_vec_dim)
+            #     for sibling_node_i, _ in node_list[cur_node]['siblings']:
+            #         sibling_node_d_vec = node_list[sibling_node_i]['pre-d-vec']
+            #         aggregate_neighbor_d_vec = fold.add('aggregate_neighbor_func',
+            #                                             sibling_node_d_vec,
+            #                                             aggregate_neighbor_d_vec,
+            #                                             cur_node_d_vec,
+            #                                             to_torch([1.]),
+            #                                             to_torch([opt_parser.cat_msg], torch.bool))
+
+            #     # message from childs (supporting, surrounding relation)
+            #     aggregate_child_d_vec = {'supp' : to_torch([0.0] * d_vec_dim), 'surr' : to_torch([0.0] * d_vec_dim)}
+            #     for child_node_i, child_node_type_i in node_list[cur_node]['childs']:
+            #         child_node_d_vec = node_list[child_node_i]['pre-d-vec']
+            #         aggregate_child_d_vec[child_node_type_i] = \
+            #             fold.add('aggregate_child_{}_func'.format(child_node_type_i),
+            #                      child_node_d_vec,
+            #                      aggregate_child_d_vec[child_node_type_i],
+            #                      cur_node_d_vec,
+            #                      to_torch([1.]),
+            #                      to_torch([opt_parser.cat_msg], torch.bool))
+
+            #     # message from loose neighbors (co-occurring relation)
+            #     aggregate_cooc_d_vec = to_torch([0.0] * d_vec_dim)
+            #     if(opt_parser.aggregate_in_order):
+            #         all_neighbor_nodes = list(node_list.keys())
+            #         all_neighbor_nodes.sort(key=lambda  x: node_list[cur_node]['dis'][x], reverse=True)
+            #     else:
+            #         all_neighbor_nodes = node_list.keys()
+            #     for neighbor_node in all_neighbor_nodes:
+            #         if (neighbor_node != cur_node):
+            #             w = node_list[cur_node]['w'][neighbor_node]
+            #             neighbor_node_d_vec = node_list[neighbor_node]['pre-d-vec']
+            #             aggregate_cooc_d_vec = fold.add('aggregate_cooc_func',
+            #                                                 neighbor_node_d_vec,
+            #                                                 aggregate_cooc_d_vec,
+            #                                                 cur_node_d_vec,
+            #                                                 w,
+            #                                                 to_torch([opt_parser.cat_msg], torch.bool))
+
+            #     node_list[cur_node]['d-vec'] = fold.add('aggregate_self_func',
+            #                                             node_list[cur_node]['pre-d-vec'],
+            #                                             aggregate_parent_d_vec['supp'],
+            #                                             aggregate_child_d_vec['supp'],
+            #                                             aggregate_parent_d_vec['surr'],
+            #                                             aggregate_child_d_vec['surr'],
+            #                                             aggregate_neighbor_d_vec,
+            #                                             aggregate_cooc_d_vec)
+            #     node_list[cur_node]['cat-d-vec'] = fold.add('cat_self_func',
+            #                                                 node_list[cur_node]['pre-d-vec'],
+            #                                                 aggregate_parent_d_vec['supp'],
+            #                                                 aggregate_child_d_vec['supp'],
+            #                                                 aggregate_parent_d_vec['surr'],
+            #                                                 aggregate_child_d_vec['surr'],
+            #                                                 aggregate_neighbor_d_vec,
+            #                                                 aggregate_cooc_d_vec)
 
         # end of func
 
@@ -449,7 +630,7 @@ class Cat_Root_to_leaf_Dec(nn.Module):
         super(Cat_Root_to_leaf_Dec, self).__init__()
 
         self.dec = nn.Sequential(
-            nn.Linear(d * 7, h),
+            nn.Linear(d * 9, h),
             nn.ReLU(),
             nn.Linear(h, d)
         )
