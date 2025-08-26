@@ -93,7 +93,7 @@ class train_model():
         Returns: list of lists, each a root-to-node path satisfying the rule.
         """
         # 1) Build undirected adjacency
-        edge_kinds = ['floor_wall','wall_wall','supporting','supported by','surrounding','surrounded by','object_cooc']
+        edge_kinds = ['floor_wall', 'supporting','supported by','surrounding','surrounded by','object_cooc']
         adj = {n: set() for n in node_list}
         for n, info in node_list.items():
             for kind in edge_kinds:
